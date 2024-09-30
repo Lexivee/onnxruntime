@@ -26,7 +26,7 @@ namespace Dml
             bool cpuSyncSpinningEnabled,
             bool keepOpen);
 
-        void SetAllocator(std::weak_ptr<BucketizedBufferAllocator> allocator);
+        void SetAllocator(std::weak_ptr<DmlBufferAllocator> allocator);
 
         // Waits for flushed work, discards unflushed work, and discards associated references to
         // prevent circular references.  Must be the last call on the object before destruction.
@@ -88,6 +88,8 @@ namespace Dml
         D3D12_COMMAND_LIST_TYPE GetCommandListTypeForQueue() const;
         bool CpuSyncSpinningEnabled() const { return m_cpuSyncSpinningEnabled; }
         bool IsClosed() const { return m_closed; }
+
+        ID3D12CommandQueue* Queue() const;
 
     private:
         Microsoft::WRL::ComPtr<ID3D12Device> m_d3dDevice;

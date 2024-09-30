@@ -7,6 +7,7 @@
 #include "core/providers/dml/DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
 #include "core/providers/dml/DmlExecutionProvider/src/IExecutionProvider.h"
 #include "core/providers/dml/DmlExecutionProvider/src/DmlReusedCommandListState.h"
+#include "core/providers/dml/DmlExecutionProvider/src/DmlBufferAllocator.h"
 
 #include <wrl/client.h>
 #include <wrl/implements.h>
@@ -24,7 +25,8 @@ namespace Dml
     class PooledUploadHeap;
     class ReadbackHeap;
     class ExecutionContext;
-    class BucketizedBufferAllocator;
+    class DmlBufferAllocator;
+    class CPUAllocator;
     class ExecutionProvider;
 
     class ExecutionProviderImpl : public WRL::Base<Dml::IExecutionProvider,
@@ -38,7 +40,8 @@ namespace Dml
             bool enableMetacommands,
             bool enableGraphCapture,
             bool enableCpuSyncSpinning,
-            bool disableMemoryArena);
+            bool disableMemoryArena,
+            Dml::DmlAllocatorType preferredAllocatorType);
 
         void ReleaseCompletedReferences();
 
@@ -139,7 +142,7 @@ namespace Dml
         // Allocate a resource from pools.  Releasing pooledResource returns it to the pool.
         STDMETHOD(AllocatePooledResource)(
             size_t size,
-            AllocatorRoundingMode roundingMode,
+            AllocatorPoolingMode poolingMode,
             ID3D12Resource **d3dResource,
             IUnknown* *pooledResource
         ) const noexcept final;
@@ -193,6 +196,8 @@ namespace Dml
 
         void FlushUploadsIfReady() const;
 
+        template <typename T> std::unique_ptr<DmlBufferAllocator> CreateBufferAllocator();
+
         ComPtr<ID3D12Device> m_d3d12Device;
         ComPtr<IDMLDevice> m_dmlDevice;
         bool m_isMcdmDevice = false;
@@ -202,6 +207,7 @@ namespace Dml
         bool m_native16BitShaderOpsSupported = false;
         bool m_graphCaptured = false;
         bool m_graphCaptureEnabled = false;
+        DmlAllocatorType m_allocatorType = DmlAllocatorType::Default;
 
         std::unordered_map<int, std::vector<std::unique_ptr<DmlReusedCommandListState>>> m_capturedGraphs;
         std::unordered_set<int> m_graphCapturingDone;
@@ -211,8 +217,8 @@ namespace Dml
         ComPtr<ExecutionContext> m_context;
         std::unique_ptr<PooledUploadHeap> m_uploadHeap;
         std::unique_ptr<ReadbackHeap> m_readbackHeap;
-        std::shared_ptr<BucketizedBufferAllocator> m_allocator;
-        std::shared_ptr<onnxruntime::IAllocator> m_cpuInputAllocator;
+        std::shared_ptr<DmlBufferAllocator> m_allocator;
+        std::shared_ptr<onnxruntime::CPUAllocator> m_cpuInputAllocator;
         std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
         std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap> m_internalRegInfoMap;
         mutable uint64_t m_partitionKernelPrefixVal = 0;
@@ -262,7 +268,8 @@ namespace Dml
             bool enableMetacommands,
             bool enableGraphCapture,
             bool enableSyncSpinning,
-            bool disableMemoryArena
+            bool disableMemoryArena,
+            Dml::DmlAllocatorType preferredAllocatorType
         );
 
         std::unique_ptr<onnxruntime::IDataTransfer> GetDataTransfer() const final override

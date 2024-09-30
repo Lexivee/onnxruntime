@@ -90,4 +90,8 @@ namespace Dml
         }
     }
 
+    ID3D12CommandQueue * CommandQueue::Queue() const
+    {
+      return m_queue.Get();
+    }
 } // namespace Dml

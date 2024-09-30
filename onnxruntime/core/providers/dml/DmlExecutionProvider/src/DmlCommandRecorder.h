@@ -11,7 +11,7 @@
 namespace Dml
 {
     class CommandQueue;
-    class BucketizedBufferAllocator;
+    class DmlBufferAllocator;
 
     class DmlCommandRecorder : public ICommandRecorder
     {
@@ -55,8 +55,8 @@ namespace Dml
 
         void Open() final;
         void CloseAndExecute() final;
-
-        void SetAllocator(std::weak_ptr<BucketizedBufferAllocator> allocator);
+        
+        void SetAllocator(std::weak_ptr<DmlBufferAllocator> allocator);
 
         bool HasUnsubmittedWork() override
         {
@@ -84,7 +84,7 @@ namespace Dml
         ID3D12DescriptorHeap* m_currentDescriptorHeap = nullptr;
 
         // The weak pointer avoids a circular reference from context->recorder->allocator->context
-        std::weak_ptr<BucketizedBufferAllocator> m_bufferAllocator;
+        std::weak_ptr<DmlBufferAllocator> m_bufferAllocator;
 
         CommandAllocatorRing<2> m_commandAllocatorRing;
 

@@ -9,6 +9,7 @@
 #include "ReadbackHeap.h"
 #include "ExecutionContext.h"
 #include "BucketizedBufferAllocator.h"
+#include "TiledBufferAllocator.h"
 #include "MLOperatorAuthorImpl.h"
 #include "core/providers/dml/OperatorAuthorHelper/MLOperatorAuthorHelper.h"
 #include "core/providers/dml/OperatorAuthorHelper/OperatorHelper.h"
@@ -36,6 +37,7 @@
 #endif
 
 #define ENABLE_GRAPH_COMPILATION
+#define DML_USE_TILED_ALLOCATOR
 
 using namespace Windows::AI::MachineLearning::Adapter;
 
@@ -73,7 +75,8 @@ namespace Dml
         bool enableMetacommands,
         bool enableGraphCapture,
         bool enableSyncSpinning,
-        bool disableMemoryArena) :
+        bool disableMemoryArena,
+        Dml::DmlAllocatorType preferredAllocatorType) :
             IExecutionProvider(onnxruntime::kDmlExecutionProvider, OrtDevice(OrtDevice::GPU, OrtDevice::MemType::DEFAULT, 0))
     {
         D3D12_COMMAND_LIST_TYPE queueType = executionContext->GetCommandListTypeForQueue();
@@ -86,7 +89,7 @@ namespace Dml
         ComPtr<ID3D12Device> device;
         GRAPHICS_THROW_IF_FAILED(dmlDevice->GetParentDevice(IID_GRAPHICS_PPV_ARGS(device.GetAddressOf())));
 
-        m_impl = wil::MakeOrThrow<ExecutionProviderImpl>(dmlDevice, device.Get(), executionContext, enableMetacommands, enableGraphCapture, enableSyncSpinning, disableMemoryArena);
+        m_impl = wil::MakeOrThrow<ExecutionProviderImpl>(dmlDevice, device.Get(), executionContext, enableMetacommands, enableGraphCapture, enableSyncSpinning, disableMemoryArena, preferredAllocatorType);
     }
 
     std::vector<std::unique_ptr<onnxruntime::ComputeCapability>>
@@ -117,7 +120,7 @@ namespace Dml
 
     HRESULT __stdcall ExecutionProviderImpl::AllocatePooledResource(
         size_t size,
-        AllocatorRoundingMode roundingMode,
+        AllocatorPoolingMode poolingMode,
         ID3D12Resource **d3dResource,
         IUnknown** pooledResource
     ) const noexcept
@@ -125,7 +128,7 @@ namespace Dml
         ORT_TRY
         {
         ComPtr<IUnknown> allocation;
-        allocation.Attach(static_cast<IUnknown* >(m_allocator->Alloc(size, roundingMode)));
+        allocation.Attach(static_cast<IUnknown* >(m_allocator->Alloc(size, poolingMode)));
 
         const auto* allocInfo = m_allocator->DecodeDataHandle(allocation.Get());
 
@@ -150,7 +153,7 @@ namespace Dml
         }
     }
 
-    ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device* d3d12Device, ExecutionContext* executionContext, bool enableMetacommands, bool enableGraphCapture, bool enableCpuSyncSpinning, bool disableMemoryArena)
+    ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device* d3d12Device, ExecutionContext* executionContext, bool enableMetacommands, bool enableGraphCapture, bool enableCpuSyncSpinning, bool disableMemoryArena, Dml::DmlAllocatorType preferredAllocatorType)
         : m_d3d12Device(d3d12Device),
           m_dmlDevice(dmlDevice),
           m_areMetacommandsEnabled(enableMetacommands),
@@ -159,6 +162,9 @@ namespace Dml
           m_memoryArenaDisabled(disableMemoryArena),
           m_context(executionContext)
     {
+        //For simpler testing let's default to tiled mode
+        m_allocatorType = preferredAllocatorType == DmlAllocatorType::Default ? DmlAllocatorType::Tiled : preferredAllocatorType;
+
         D3D12_FEATURE_DATA_FEATURE_LEVELS featureLevels = {};
 
         D3D_FEATURE_LEVEL featureLevelsList[] = {
@@ -180,13 +186,23 @@ namespace Dml
             sizeof(featureLevels)
             ));
 
-        D3D12_FEATURE_DATA_D3D12_OPTIONS4 featureOptions = {};
+        if (m_allocatorType == DmlAllocatorType::Tiled)
+        {
+            D3D12_FEATURE_DATA_D3D12_OPTIONS featureOptions = {};
+            if (FAILED(d3d12Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &featureOptions, sizeof(featureOptions))) ||
+                featureOptions.TiledResourcesTier < D3D12_TILED_RESOURCES_TIER_1)
+            {
+                m_allocatorType = DmlAllocatorType::Bucketized;
+            }
+        }
+
+        D3D12_FEATURE_DATA_D3D12_OPTIONS4 featureOptions4 = {};
         if (SUCCEEDED(d3d12Device->CheckFeatureSupport(
             D3D12_FEATURE_D3D12_OPTIONS4,
-            &featureOptions,
-            sizeof(featureOptions))))
+            &featureOptions4,
+            sizeof(featureOptions4))))
         {
-            m_native16BitShaderOpsSupported = featureOptions.Native16BitShaderOpsSupported;
+            m_native16BitShaderOpsSupported = featureOptions4.Native16BitShaderOpsSupported;
         }
 
         m_isMcdmDevice = (featureLevels.MaxSupportedFeatureLevel <= D3D_FEATURE_LEVEL_1_0_CORE);
@@ -225,18 +241,30 @@ namespace Dml
         m_lastUploadFlushTime = std::chrono::steady_clock::now();
     }
 
+    template <typename T> std::unique_ptr<DmlBufferAllocator> ExecutionProviderImpl::CreateBufferAllocator()
+    {
+        return std::make_unique<T>(
+            m_d3d12Device.Get(),
+            m_context.Get(), // TODO(leca): REVIEW: Will it cause memory issue when m_context is released in EP while alloc is released in sessionState?
+            CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT), D3D12_HEAP_FLAG_NONE,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            std::make_unique<DmlCommittedResourceAllocator>(m_d3d12Device.Get()));
+    }
+
     std::vector<onnxruntime::AllocatorPtr> ExecutionProviderImpl::CreatePreferredAllocators() {
         if (!m_allocator)
         {
             // Create an allocator for D3D12 buffers used to hold tensor data. The returned buffers from the allocator
             // should be DEFAULT heap buffers which can be used as UAVs, and which start in UAV state.
-            m_allocator = std::make_shared<BucketizedBufferAllocator>(m_d3d12Device.Get(),
-                m_context.Get(),  // TODO(leca): REVIEW: Will it cause memory issue when m_context is released in EP while alloc is released in sessionState?
-                CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-                D3D12_HEAP_FLAG_NONE,
-                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                std::make_unique<DmlCommittedResourceAllocator>(m_d3d12Device.Get()));
+            switch (m_allocatorType)
+            {
+            case DmlAllocatorType::Bucketized:
+                m_allocator = CreateBufferAllocator<BucketizedBufferAllocator>();
+                break;
+            case Dml::DmlAllocatorType::Tiled:
+                m_allocator = CreateBufferAllocator<TiledBufferAllocator>();
+                break;
+            }
             m_context->SetAllocator(m_allocator);
             // CPU Allocator used to create buffers for the MemcpyFromHost, Shape and Size operators.
             OrtMemoryInfo memoryInfo(onnxruntime::CPU, OrtAllocatorType::OrtDeviceAllocator);
@@ -1185,11 +1213,13 @@ namespace Dml
         m_context->ReleaseCompletedReferences();
         m_uploadHeap->Trim();
 
+        // Allocations after this point are potentially transient and their sizes are
+        // rounded to enable pooling.
         if (!m_memoryArenaDisabled)
         {
             // Allocations after this point are potentially transient and their sizes are
             // rounded to enable pooling.
-            m_allocator->SetDefaultRoundingMode(AllocatorRoundingMode::Enabled);
+            m_allocator->SetDefaultRoundingMode(AllocatorPoolingMode::Enabled);
         }
 
         m_sessionInitialized = true;
@@ -1242,6 +1272,7 @@ namespace Dml
         // Flush any pending work to the GPU, but don't block for completion, permitting it
         // to overlap other work.
         Flush();
+        m_allocator->Clean();
         return onnxruntime::common::Status::OK();
     }
 
@@ -1251,14 +1282,15 @@ namespace Dml
         bool enableMetacommands,
         bool enableGraphCapture,
         bool enableCpuSyncSpinning,
-        bool disableMemoryArena)
+        bool disableMemoryArena,
+        Dml::DmlAllocatorType preferredAllocatorType)
     {
-        return std::make_unique<Dml::ExecutionProvider>(dmlDevice, executionContext, enableMetacommands, enableGraphCapture, enableCpuSyncSpinning, disableMemoryArena);
+        return std::make_unique<Dml::ExecutionProvider>(dmlDevice, executionContext, enableMetacommands, enableGraphCapture, enableCpuSyncSpinning, disableMemoryArena, preferredAllocatorType);
     }
 
     ID3D12Resource* GetD3D12ResourceFromAllocation(onnxruntime::IAllocator* allocator, void* ptr)
     {
-        Dml::BucketizedBufferAllocator* pAllocationInfo = static_cast<Dml::BucketizedBufferAllocator*>(allocator);
+        Dml::DmlBufferAllocator* pAllocationInfo = static_cast<Dml::DmlBufferAllocator*>(allocator);
         return pAllocationInfo->DecodeDataHandle(ptr)->GetResource();
     }
 
