@@ -6,8 +6,8 @@
 #include <limits>
 #include <memory>
 #include <unordered_map>
-#include <vector>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 #include "core/framework/node_unit.h"
@@ -77,6 +77,10 @@ struct XnnpackOperatorDeleter {
 
 bool IsPaddingTypeSupported(AutoPadType auto_pad);
 
+using COMPUTE_TYPE_SETS = std::unordered_set<ONNX_NAMESPACE::TensorProto_DataType>;
+bool IsComputeTypeSupported(int32_t compute_type,
+                            std::optional<std::reference_wrapper<COMPUTE_TYPE_SETS>> compute_type_set = std::nullopt);
+
 using XnnpackOperator = std::unique_ptr<struct xnn_operator, XnnpackOperatorDeleter>;
 
 std::unique_ptr<IndexedSubGraph::MetaDef> FuseActivation(const NodeUnit& conv_unit, const NodeUnit& activation,
@@ -99,5 +103,6 @@ auto xnn_u8s8_quantize(float val, float scale, T zero_point) {
   auto zp = static_cast<float>(zero_point);
   return static_cast<T>(lrintf(fminf(fmaxf(val / scale + zp, typed_min), typed_max)));
 }
+
 }  // namespace xnnpack
 }  // namespace onnxruntime

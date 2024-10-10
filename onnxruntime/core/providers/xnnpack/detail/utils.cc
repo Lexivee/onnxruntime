@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "utils.h"
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -9,9 +10,11 @@
 #include "core/common/safeint.h"
 #include "core/framework/node_unit.h"
 #include "core/framework/tensorprotoutils.h"
+#include "core/graph/graph.h"
 #include "core/graph/indexed_sub_graph.h"
 #include "core/graph/node_attr_utils.h"
 #include "core/optimizer/initializer.h"
+#include "core/providers/xnnpack/xnnpack_init.h"
 
 #include "onnx/defs/attr_proto_util.h"
 
@@ -109,6 +112,20 @@ bool IsPaddingTypeSupported(AutoPadType auto_pad) {
   return auto_pad == AutoPadType::NOTSET ||
          auto_pad == AutoPadType::VALID ||
          auto_pad == AutoPadType::SAME_UPPER;
+}
+
+bool IsComputeTypeSupported(int32_t compute_type,
+                            std::optional<std::reference_wrapper<COMPUTE_TYPE_SETS>> compute_type_set) {
+  std::unordered_set<ONNX_NAMESPACE::TensorProto_DataType> default_supported_types{
+      ONNX_NAMESPACE::TensorProto_DataType_FLOAT,
+      ONNX_NAMESPACE::TensorProto_DataType_UINT8,
+      ONNX_NAMESPACE::TensorProto_DataType_INT8};
+  auto supported_types = compute_type_set == std::nullopt ? default_supported_types : compute_type_set->get();
+#ifdef XNNPACK_FP16_SUPPORTED
+  supported_types.insert(ONNX_NAMESPACE::TensorProto_DataType_FLOAT16);
+#endif
+  ONNX_NAMESPACE::TensorProto_DataType tp = static_cast<ONNX_NAMESPACE::TensorProto_DataType>(compute_type);
+  return std::find(supported_types.begin(), supported_types.end(), tp) != supported_types.end();
 }
 
 typedef std::string ONNXOpType;
