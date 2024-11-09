@@ -436,7 +436,7 @@ Status SessionState::PrepackConstantInitializedTensors(InlinedHashMap<std::strin
                   // kernel like Matmul_nbits will call prepack multiple times with input_B and possibly scales/zero_points.
                   // If prepacked weights already read from ONNX data file (this happens we ORT reads data file with prepacked
                   // weights serialized), only need to set prepacked weights once to kernel.
-                  is_kernel_prepacked = true;
+                  is_kernel_prepacked = kernel->Info().GetKernelDef().OpName() == "MatMulNBits";
                   ORT_THROW_IF_ERROR(kernel->SetPrePackTensor(input_idx, const_initialized_tensor));
                 }
                 // Caching pre-packed weights is limited to shared initializers associated with the CPU EP for now

@@ -236,6 +236,32 @@ int32_t ONNXTensorElementDataTypeToProtoTensorType(ONNXTensorElementDataType);
 
 std::string GetPrepackedInitializerName(const std::string& initializer_name, const std::string& node_name);
 
+size_t GetMemoryAlignedOffset(size_t current_offset);
+
+size_t CalculateTensorShapeVectorMemoryUsage(TensorShapeVector& tensor_shape_vector);
+
+Tensor ConvertPackedBufferAndShapeToTensor(onnxruntime::AllocatorPtr& alloc,
+                                           const onnxruntime::Tensor& weights,
+                                           size_t packed_weights_size_,
+                                           TensorShape weight_shape_,
+                                           int weight_size_factor,
+                                           void* original_packed_buffer,
+                                           IAllocatorUniquePtr<void>& packed_buffer);
+
+Tensor ConvertPackedBufferAndShapeToTensorWithFlag(onnxruntime::AllocatorPtr& alloc,
+                                                   const onnxruntime::Tensor& weights,
+                                                   size_t packed_weights_size_,
+                                                   TensorShape weight_shape_,
+                                                   int weight_size_factor,
+                                                   void* original_packed_buffer,
+                                                   IAllocatorUniquePtr<void>& packed_buffer,
+                                                   const char flag);
+
+void ConvertTensorToPackedBufferAndShape(size_t& packed_weights_size_,
+                                         TensorShape& weight_shape_,
+                                         IAllocatorUniquePtr<void>& packed_weights_,
+                                         void* buffer_start);
+
 #ifdef ENABLE_TRAINING
 common::Status VerifyInputTensorsAllocatedContiguously(OpKernelContext* context);
 #endif

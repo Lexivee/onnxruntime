@@ -44,11 +44,17 @@ class MatMul<float> final : public OpKernel {
   Status UseSharedPrePackedBuffers(std::vector<BufferUniquePtr>& prepacked_buffers, int input_idx,
                                    /*out*/ bool& used_shared_buffers) override;
 
+  std::optional<Tensor> GetPrePackTensor(int /*input_idx*/) override;
+
+  Status SetPrePackTensor(int input_idx, const Tensor& pre_packed_tensor) override;
+
   Status Compute(OpKernelContext* context) const override;
 
  private:
   TensorShape b_shape_;
   IAllocatorUniquePtr<void> packed_b_;
+  IAllocatorUniquePtr<void> packed_buffer_;
+  std::optional<Tensor> packed_tensor_{std::nullopt};
 
   // For FusedMatMul contrib ops
   float alpha_attr_;

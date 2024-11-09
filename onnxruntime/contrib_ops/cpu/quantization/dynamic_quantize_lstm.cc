@@ -1,4 +1,5 @@
 #include "core/common/narrow.h"
+#include "core/framework/utils.h"
 #include "core/providers/cpu/rnn/lstm_base.h"
 #include "core/providers/cpu/rnn/rnn_helpers.h"
 #include "core/providers/cpu/rnn/uni_directional_lstm.h"
@@ -20,6 +21,10 @@ class DynamicQuantizeLSTM : public OpKernel, public LSTMBase {
                                    int input_idx,
                                    /*out*/ bool& used_shared_buffers) override;
 
+  std::optional<Tensor> GetPrePackTensor(int input_index) override;
+
+  Status SetPrePackTensor(int input_idx, const Tensor& pre_packed_tensor) override;
+
   Status Compute(OpKernelContext* context) const override;
 
   ~DynamicQuantizeLSTM() override = default;
@@ -35,6 +40,10 @@ class DynamicQuantizeLSTM : public OpKernel, public LSTMBase {
   PackedWeights packed_R_;
   bool is_W_signed_;
   bool is_R_signed_;
+  IAllocatorUniquePtr<void> packed_buffer_w_;
+  IAllocatorUniquePtr<void> packed_buffer_r_;
+  std::optional<Tensor> packed_tensor_w_{std::nullopt};
+  std::optional<Tensor> packed_tensor_r_{std::nullopt};
 };
 
 Status DynamicQuantizeLSTM::TryPackWeights(const Tensor& weights, PackedWeights& packed_weights,
@@ -91,7 +100,7 @@ static void UseSharedPrePackedBuffersImpl(std::vector<BufferUniquePtr>& prepacke
 }
 
 Status DynamicQuantizeLSTM::PrePack(const Tensor& tensor, int input_idx, AllocatorPtr alloc,
-                                    bool /*save_prepacked_initializers*/,
+                                    bool save_prepacked_initializers,
                                     /*out*/ bool& is_packed,
                                     /*out*/ PrePackedWeights* prepacked_weights) {
   is_packed = false;
@@ -104,6 +113,12 @@ Status DynamicQuantizeLSTM::PrePack(const Tensor& tensor, int input_idx, Allocat
       prepacked_weights->buffers_.push_back(std::move(packed_W_.buffer_));
       prepacked_weights->buffer_sizes_.push_back(packed_W_.buffer_size_);
     }
+
+    if (is_packed && save_prepacked_initializers) {
+      void* original_packed_buffer = share_prepacked_weights ? prepacked_weights->buffers_[0].get() : packed_W_.buffer_.get();
+      packed_tensor_w_ = utils::ConvertPackedBufferAndShapeToTensor(alloc, tensor, packed_W_.buffer_size_, tensor.Shape(), num_directions_,
+                                                                    original_packed_buffer, packed_buffer_w_);
+    }
   } else if (input_idx == 2) {
     ORT_RETURN_IF_ERROR(TryPackWeights(tensor, packed_R_, is_packed, is_R_signed_, alloc));
 
@@ -111,6 +126,12 @@ Status DynamicQuantizeLSTM::PrePack(const Tensor& tensor, int input_idx, Allocat
     if (is_packed && share_prepacked_weights) {
       prepacked_weights->buffers_.push_back(std::move(packed_R_.buffer_));
       prepacked_weights->buffer_sizes_.push_back(packed_R_.buffer_size_);
+    }
+
+    if (is_packed && save_prepacked_initializers) {
+      void* original_packed_buffer = share_prepacked_weights ? prepacked_weights->buffers_[0].get() : packed_R_.buffer_.get();
+      packed_tensor_r_ = utils::ConvertPackedBufferAndShapeToTensor(alloc, tensor, packed_R_.buffer_size_, tensor.Shape(), num_directions_,
+                                                                    original_packed_buffer, packed_buffer_r_);
     }
   }
 
@@ -128,6 +149,32 @@ Status DynamicQuantizeLSTM::UseSharedPrePackedBuffers(std::vector<BufferUniquePt
   } else if (input_idx == 2) {
     used_shared_buffers = true;
     UseSharedPrePackedBuffersImpl(prepacked_buffers, packed_R_);
+  }
+
+  return Status::OK();
+}
+
+std::optional<Tensor> DynamicQuantizeLSTM::GetPrePackTensor(int input_index) {
+  if (input_index == 1) {
+    return std::move(packed_tensor_w_);
+  } else if (input_index == 2) {
+    return std::move(packed_tensor_r_);
+  } else {
+    return std::nullopt;
+  }
+}
+
+Status DynamicQuantizeLSTM::SetPrePackTensor(int input_idx, const Tensor& pre_packed_tensor) {
+  AllocatorPtr alloc;
+
+  if (input_idx == 1) {
+    utils::ConvertTensorToPackedBufferAndShape(packed_W_.weights_size_, packed_W_.shape_, packed_W_.buffer_, const_cast<void*>(pre_packed_tensor.DataRaw()));
+    packed_W_.buffer_size_ = packed_W_.weights_size_ * num_directions_;
+    is_W_signed_ = pre_packed_tensor.IsDataType<int8_t>();
+  } else if (input_idx == 2) {
+    utils::ConvertTensorToPackedBufferAndShape(packed_R_.weights_size_, packed_R_.shape_, packed_R_.buffer_, const_cast<void*>(pre_packed_tensor.DataRaw()));
+    packed_R_.buffer_size_ = packed_R_.weights_size_ * num_directions_;
+    is_R_signed_ = pre_packed_tensor.IsDataType<int8_t>();
   }
 
   return Status::OK();

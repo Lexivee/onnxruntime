@@ -7,6 +7,7 @@
 
 #include "core/common/narrow.h"
 #include "core/framework/op_kernel.h"
+#include "core/framework/utils.h"
 #include "core/providers/cpu/rnn/rnn_helpers.h"
 
 namespace onnxruntime {
@@ -58,9 +59,6 @@ class DeepCpuGruOp final : public OpKernel {
 
   Status Compute(OpKernelContext* context) const override;
 
-  ~DeepCpuGruOp() override = default;
-
- private:
   Status PrePack(const Tensor& tensor, int input_idx, AllocatorPtr alloc,
                  bool save_prepacked_initializers,
                  /*out*/ bool& is_packed,
@@ -69,6 +67,18 @@ class DeepCpuGruOp final : public OpKernel {
   Status UseSharedPrePackedBuffers(std::vector<BufferUniquePtr>& prepacked_buffers,
                                    int input_idx,
                                    /*out*/ bool& used_shared_buffers) override;
+
+  std::optional<Tensor> GetPrePackTensor(int input_index) override;
+
+  Status SetPrePackTensor(int input_idx, const Tensor& pre_packed_tensor) override;
+
+  ~DeepCpuGruOp() override = default;
+
+ private:
+  Tensor ConvertZRAndHPrePackWeightToTensor(onnxruntime::AllocatorPtr& alloc, const onnxruntime::Tensor& tensor,
+                                            bool share_prepacked_weights, PrePackedWeights* prepacked_weights);
+
+  void ConvertTensorToZRAndHPrePackWeights(void* tesnor_data_raw);
 
   bool TryPackInputWeights(const Tensor& weight, AllocatorPtr& alloc);
 
@@ -91,6 +101,10 @@ class DeepCpuGruOp final : public OpKernel {
   rnn::detail::PackedWeights pre_packed_recurrent_ZR_;
   // recurrent_weights_H_ fwd, followed by bwd
   rnn::detail::PackedWeights pre_packed_recurrent_H_;
+  IAllocatorUniquePtr<void> packed_buffer_;
+  IAllocatorUniquePtr<void> packed_buffer_recurrent_;
+  std::optional<Tensor> packed_tensor_{std::nullopt};
+  std::optional<Tensor> packed_tensor_recurrent_{std::nullopt};
 
   template <typename T>
   Status ComputeImpl(OpKernelContext& context) const;

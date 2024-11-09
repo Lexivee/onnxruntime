@@ -17,6 +17,7 @@
 
 #include "core/providers/cpu/nn/conv_transpose.h"
 
+#include "core/framework/utils.h"
 #include "core/mlas/inc/mlas.h"
 #include "core/common/safeint.h"
 #include "core/util/math.h"
@@ -48,7 +49,7 @@ Status ConvTranspose<T>::PrePack(const Tensor& /*tensor*/, int /*input_idx*/, Al
 
 template <>
 Status ConvTranspose<float>::PrePack(const Tensor& tensor, int input_idx, AllocatorPtr alloc,
-                                     bool /*save_prepacked_initializers*/,
+                                     bool save_prepacked_initializers,
                                      /*out*/ bool& is_packed,
                                      /*out*/ PrePackedWeights* prepacked_weights) {
   is_packed = false;
@@ -89,6 +90,14 @@ Status ConvTranspose<float>::PrePack(const Tensor& tensor, int input_idx, Alloca
       prepacked_weights->buffer_sizes_.push_back(packed_filter_data_size);
     }
 
+    if (save_prepacked_initializers) {
+      // alloc passed in has been moved, create new alloctor here
+      AllocatorPtr alloc_cpu = std::make_shared<CPUAllocator>();
+      void* original_packed_buffer = share_prepacked_weights ? prepacked_weights->buffers_[0].get() : transposed_filter_.get();
+      packed_tensor_ = utils::ConvertPackedBufferAndShapeToTensor(alloc_cpu, tensor, packed_filter_data_size, filter_shape_, 1,
+                                                                  original_packed_buffer, packed_buffer_);
+    }
+
     is_packed = true;
   }
   return Status::OK();
@@ -111,6 +120,35 @@ Status ConvTranspose<float>::UseSharedPrePackedBuffers(std::vector<BufferUniqueP
   if (input_idx == 1) {
     used_shared_buffers = true;
     transposed_filter_ = std::move(prepacked_buffers[0]);
+  }
+
+  return Status::OK();
+}
+
+template <typename T>
+std::optional<Tensor> ConvTranspose<T>::GetPrePackTensor(int /*input_index*/) {
+  return std::nullopt;
+}
+
+template <>
+std::optional<Tensor> ConvTranspose<float>::GetPrePackTensor(int input_index) {
+  if (input_index == 1) {
+    return std::move(packed_tensor_);
+  }
+
+  return std::nullopt;
+}
+
+template <typename T>
+Status ConvTranspose<T>::SetPrePackTensor(int input_idx, const Tensor& pre_packed_tensor) {
+  return Status::OK();
+}
+
+template <>
+Status ConvTranspose<float>::SetPrePackTensor(int input_idx, const Tensor& pre_packed_tensor) {
+  if (input_idx == 1) {
+    size_t packed_b_size_;
+    utils::ConvertTensorToPackedBufferAndShape(packed_b_size_, filter_shape_, transposed_filter_, const_cast<void*>(pre_packed_tensor.DataRaw()));
   }
 
   return Status::OK();

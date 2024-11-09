@@ -507,46 +507,52 @@ TEST(InferenceSessionTests, TestModelSerialization) {
 #if defined(__amd64__) || defined(_M_AMD64) || defined(__aarch64__) || defined(_M_ARM64)
 TEST(InferenceSessionTests, TestPrePackSerialization) {
   SessionOptions so;
-  std::string model_name = "model_with_matmul_nbits";
+  for (std::string model_name : {"model_with_matmul_nbits", "model_with_gemm", "model_with_matmul", "model_with_conv_transpose",
+                                 "model_with_deep_cpu_lstm", "model_with_attention", "model_with_quant_attention",
+                                 "model_with_dynamic_quan_lstm", "model_with_matmul_integer_quant",
+#if defined(MLAS_F16VEC_INTRINSICS_SUPPORTED)
+                                 "model_with_fp16_conv",
+#endif
+                                 "model_with_deep_cpu_gru", "model_with_quant_linearconv"}) {
+    const std::string test_model = "testdata/prepack/" + model_name + ".onnx";
+    const std::string optimized_model = "testdata/prepack/" + model_name + "_opt.onnx";
 
-  const std::string test_model = "testdata/prepack/" + model_name + ".onnx";
-  const std::string optimized_model = "testdata/prepack/" + model_name + "_opt.onnx";
+    so.session_logid = "InferenceSessionTests.TestPrepackSerialization";
+    so.enable_cpu_mem_arena = false;
+    so.graph_optimization_level = TransformerLevel::Default;
+    so.optimized_model_filepath = optimized_model;
+    std::string external_initializer_file_name = model_name + "_opt.onnx.data";
 
-  so.session_logid = "InferenceSessionTests.TestPrepackSerialization";
-  so.enable_cpu_mem_arena = false;
-  so.graph_optimization_level = TransformerLevel::Default;
-  so.optimized_model_filepath = optimized_model;
-  std::string external_initializer_file_name = model_name + "_opt.onnx.data";
+    // enable serialize prepack initializer to data file
+    ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kOrtSessionOptionsSavePrePackedConstantInitializers,
+                                                      "1"));
+    // always save external initializer to data file for test
+    ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kOrtSessionOptionsOptimizedModelExternalInitializersMinSizeInBytes,
+                                                      "0"));
+    ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kOrtSessionOptionsOptimizedModelExternalInitializersFileName,
+                                                      external_initializer_file_name.c_str()));
 
-  // enable serialize prepack initializer to data file
-  ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kOrtSessionOptionsSavePrePackedConstantInitializers,
-                                                    "1"));
-  // always save external initializer to data file for test
-  ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kOrtSessionOptionsOptimizedModelExternalInitializersMinSizeInBytes,
-                                                    "0"));
-  ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kOrtSessionOptionsOptimizedModelExternalInitializersFileName,
-                                                    external_initializer_file_name.c_str()));
+    // optimize model with serialize prepack constant initializers
+    InferenceSessionWrapper session_object{so, GetEnvironment()};
+    ASSERT_TRUE(session_object.Load(test_model).IsOK());
+    ASSERT_TRUE(session_object.Initialize().IsOK());
 
-  // optimize model with serialize prepack constant initializers
-  InferenceSessionWrapper session_object{so, GetEnvironment()};
-  ASSERT_TRUE(session_object.Load(test_model).IsOK());
-  ASSERT_TRUE(session_object.Initialize().IsOK());
+    // Verify prepack initializers are serialized into optimized model and data file
+    // load optimized model and check initializer are prepacked
+    auto logger = DefaultLoggingManager().CreateLogger("TestPrepackSerialization");
+    std::shared_ptr<Model> model;
+    auto load_status = Model::Load(ToWideString(optimized_model), model, nullptr, *logger);
+    ASSERT_EQ(Status::OK(), load_status);
+    Graph& graph = model->MainGraph();
 
-  // Verify prepack initializers are serialized into optimized model and data file
-  // load optimized model and check initializer are prepacked
-  auto logger = DefaultLoggingManager().CreateLogger("TestPrepackSerialization");
-  std::shared_ptr<Model> model;
-  auto load_status = Model::Load(ToWideString(optimized_model), model, nullptr, *logger);
-  ASSERT_EQ(Status::OK(), load_status);
-  Graph& graph = model->MainGraph();
-
-  bool found_prepack_initializer = false;
-  for (const auto& item : graph.GetAllInitializedTensors()) {
-    if (item.first.find(':') != std::string::npos) {
-      found_prepack_initializer = true;
+    bool found_prepack_initializer = false;
+    for (const auto& item : graph.GetAllInitializedTensors()) {
+      if (item.first.find(':') != std::string::npos) {
+        found_prepack_initializer = true;
+      }
     }
+    ASSERT_TRUE(found_prepack_initializer);
   }
-  ASSERT_TRUE(found_prepack_initializer);
 }
 #endif
 #endif

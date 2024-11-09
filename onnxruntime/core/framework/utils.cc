@@ -1070,5 +1070,135 @@ std::string GetPrepackedInitializerName(const std::string& initializer_name, con
   return initializer_name + seperator + node_name;
 }
 
+size_t GetMemoryAlignedOffset(size_t current_offset) {
+  const size_t alignment_number_of_bytes = 64;
+
+  return ((current_offset - 1) / alignment_number_of_bytes + 1) * alignment_number_of_bytes;
+}
+
+size_t CalculateTensorShapeVectorMemoryUsage(TensorShapeVector& tensor_shape_vector) {
+  // Calculate memory for the vector object itself (metadata)
+  size_t vector_metadata_size = sizeof(std::vector<int64_t>);
+
+  // Calculate memory used by the elements in the vector
+  size_t vector_data_size = tensor_shape_vector.capacity() * sizeof(int64_t);
+
+  // Return Total memory usage
+  return vector_metadata_size + vector_data_size;
+}
+
+Tensor ConvertPackedBufferAndShapeToTensor(onnxruntime::AllocatorPtr& alloc,
+                                           const onnxruntime::Tensor& weights,
+                                           size_t packed_weights_size_,
+                                           TensorShape weight_shape_,
+                                           int weight_size_factor,
+                                           void* original_packed_buffer,
+                                           IAllocatorUniquePtr<void>& packed_buffer) {
+  // buffer of packed_tensor is combine of:
+  // 1. packed_weights_size_
+  // 2. weight shape: first vector memory size, then vector content
+  // 3. original packed_weights buffer
+  TensorShapeVector shape_vector = weight_shape_.AsShapeVector();
+  size_t shape_vector_mem_size = utils::CalculateTensorShapeVectorMemoryUsage(shape_vector);
+  void* shape_vector_ptr = static_cast<void*>(&shape_vector);
+
+  size_t aligned_offset = utils::GetMemoryAlignedOffset(2 * sizeof(size_t) + shape_vector_mem_size);
+
+  size_t buffer_size = packed_weights_size_ * weight_size_factor + aligned_offset;
+
+  packed_buffer = IAllocator::MakeUniquePtr<void>(alloc,
+                                                  buffer_size,
+                                                  true);
+  std::memcpy(packed_buffer.get(),
+              &packed_weights_size_,
+              sizeof(size_t));
+  std::memcpy(static_cast<char*>(packed_buffer.get()) + sizeof(size_t),
+              &shape_vector_mem_size,
+              sizeof(size_t));
+  std::memcpy(static_cast<char*>(packed_buffer.get()) + 2 * sizeof(size_t),
+              shape_vector_ptr,
+              shape_vector_mem_size);
+  std::memcpy(static_cast<char*>(packed_buffer.get()) + aligned_offset,
+              original_packed_buffer,
+              packed_weights_size_ * weight_size_factor);
+
+  std::vector<int64_t> packed_weights_dims = {static_cast<int64_t>((buffer_size - 1) / weights.DataType()->Size()) + 1};
+  return Tensor(weights.DataType(),
+                TensorShape(packed_weights_dims),
+                packed_buffer.get(),
+                OrtMemoryInfo(CPU, OrtAllocatorType::OrtDeviceAllocator));
+}
+
+Tensor ConvertPackedBufferAndShapeToTensorWithFlag(onnxruntime::AllocatorPtr& alloc,
+                                                   const onnxruntime::Tensor& weights,
+                                                   size_t packed_weights_size_,
+                                                   TensorShape weight_shape_,
+                                                   int weight_size_factor,
+                                                   void* original_packed_buffer,
+                                                   IAllocatorUniquePtr<void>& packed_buffer,
+                                                   const char flag) {
+  // buffer of packed_tensor is combine of:
+  // 1. char indicate this is packed W or reordered W
+  // 2. packed_weights_size_
+  // 3. weight shape: first vector memory size, then vector content
+  // 4. original packed_weights buffer
+  TensorShapeVector shape_vector = weight_shape_.AsShapeVector();
+  size_t shape_vector_mem_size = utils::CalculateTensorShapeVectorMemoryUsage(shape_vector);
+  void* shape_vector_ptr = static_cast<void*>(&shape_vector);
+
+  size_t aligned_offset = utils::GetMemoryAlignedOffset(2 * sizeof(size_t) + shape_vector_mem_size + 1);
+  size_t buffer_size = packed_weights_size_ * weight_size_factor + aligned_offset;
+
+  packed_buffer = IAllocator::MakeUniquePtr<void>(alloc,
+                                                  buffer_size,
+                                                  true);
+
+  std::memcpy(packed_buffer.get(),
+              &flag,
+              1);
+  std::memcpy(static_cast<char*>(packed_buffer.get()) + 1,
+              &packed_weights_size_,
+              sizeof(size_t));
+  std::memcpy(static_cast<char*>(packed_buffer.get()) + sizeof(size_t) + 1,
+              &shape_vector_mem_size,
+              sizeof(size_t));
+  std::memcpy(static_cast<char*>(packed_buffer.get()) + 2 * sizeof(size_t) + 1,
+              shape_vector_ptr,
+              shape_vector_mem_size);
+  std::memcpy(static_cast<char*>(packed_buffer.get()) + aligned_offset,
+              original_packed_buffer,
+              packed_weights_size_ * weight_size_factor);
+
+  std::vector<int64_t> packed_weights_dims = {static_cast<int64_t>((buffer_size - 1) / weights.DataType()->Size()) + 1};
+  return Tensor(weights.DataType(),
+                TensorShape(packed_weights_dims),
+                packed_buffer.get(),
+                OrtMemoryInfo(CPU, OrtAllocatorType::OrtDeviceAllocator));
+}
+
+void ConvertTensorToPackedBufferAndShape(size_t& packed_weights_size_,
+                                         TensorShape& weight_shape_,
+                                         IAllocatorUniquePtr<void>& packed_weights_,
+                                         void* buffer_start) {
+  // buffer of packed_tensor is combine of:
+  // 1. packed_weights_size_
+  // 2. weight shape: first vector memory size, then vector content
+  // 3. original packed_weights buffer
+  packed_weights_size_ = *reinterpret_cast<size_t*>(buffer_start);
+  size_t weight_shape_buffer_size = *(reinterpret_cast<size_t*>(buffer_start) + 1);
+
+  AllocatorPtr alloc = std::make_shared<CPUAllocator>();
+  auto weight_shape_buffer = IAllocator::MakeUniquePtr<void>(alloc, weight_shape_buffer_size, true);
+  std::memcpy(weight_shape_buffer.get(),
+              static_cast<char*>(buffer_start) + 2 * sizeof(size_t),
+              weight_shape_buffer_size);
+  auto weight_shape_vector = static_cast<const InlinedVector<int64_t>*>(weight_shape_buffer.get());
+  weight_shape_ = TensorShape(*weight_shape_vector);
+
+  size_t aligned_offset = utils::GetMemoryAlignedOffset(2 * sizeof(size_t) + weight_shape_buffer_size);
+  packed_weights_ = BufferUniquePtr(static_cast<char*>(buffer_start) + aligned_offset,
+                                    BufferDeleter());
+}
+
 }  // namespace utils
 }  // namespace onnxruntime

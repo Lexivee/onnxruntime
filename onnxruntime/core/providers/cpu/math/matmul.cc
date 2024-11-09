@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include "core/framework/utils.h"
 #include "core/providers/cpu/math/matmul.h"
 #include "core/providers/cpu/math/gemm_matmul_common.h"
 #include "core/providers/cpu/math/matmul_helper.h"
@@ -173,7 +174,7 @@ bool GemmPackBBfloat16(AllocatorPtr& alloc,
 #endif
 
 Status MatMul<float>::PrePack(const Tensor& tensor, int input_idx, /*out*/ AllocatorPtr alloc,
-                              bool /*save_prepacked_initializers*/,
+                              bool save_prepacked_initializers,
                               /*out*/ bool& is_packed,
                               /*out*/ PrePackedWeights* prepacked_weights) {
   is_packed = false;
@@ -204,6 +205,12 @@ Status MatMul<float>::PrePack(const Tensor& tensor, int input_idx, /*out*/ Alloc
       prepacked_weights->buffers_.push_back(std::move(packed_b_));
       prepacked_weights->buffer_sizes_.push_back(packed_b_size);
     }
+
+    if (is_packed && save_prepacked_initializers) {
+      void* original_packed_buffer = share_prepacked_weights ? prepacked_weights->buffers_[0].get() : packed_b_.get();
+      packed_tensor_ = utils::ConvertPackedBufferAndShapeToTensor(alloc, tensor, packed_b_size, b_shape_, 1,
+                                                                  original_packed_buffer, packed_buffer_);
+    }
   }
   return Status::OK();
 }
@@ -216,6 +223,19 @@ Status MatMul<float>::UseSharedPrePackedBuffers(std::vector<BufferUniquePtr>& pr
   if (input_idx == 1) {
     used_shared_buffers = true;
     packed_b_ = std::move(prepacked_buffers[0]);
+  }
+
+  return Status::OK();
+}
+
+std::optional<Tensor> MatMul<float>::GetPrePackTensor(int /*input_index*/) {
+  return std::move(packed_tensor_);
+}
+
+Status MatMul<float>::SetPrePackTensor(int input_idx, const Tensor& pre_packed_tensor) {
+  if (input_idx == 1) {
+    size_t packed_b_size_;
+    utils::ConvertTensorToPackedBufferAndShape(packed_b_size_, b_shape_, packed_b_, const_cast<void*>(pre_packed_tensor.DataRaw()));
   }
 
   return Status::OK();

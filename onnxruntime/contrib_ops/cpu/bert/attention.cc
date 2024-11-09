@@ -4,6 +4,7 @@
 #include "attention_cpu_base.h"
 #include "attention_helper.h"
 #include "core/framework/tensorprotoutils.h"
+#include "core/framework/utils.h"
 #include "core/graph/onnx_protobuf.h"
 #include "core/util/math.h"
 #include "core/util/math_cpuonly.h"
@@ -38,15 +39,25 @@ class Attention : public OpKernel, public AttentionCPUBase {
                                    int input_idx,
                                    /*out*/ bool& used_shared_buffers) override;
 
+  virtual std::optional<Tensor> GetPrePackTensor(int /*input_index*/) override;
+
+  Status SetPrePackTensor(int input_idx, const Tensor& pre_packed_tensor) override;
+
  private:
   bool IsPackWeightsSuccessful(int qkv_index, AllocatorPtr alloc, size_t head_size,
                                size_t input_hidden_size, const T* weights_data,
                                size_t weight_matrix_col_size, PrePackedWeights* prepacked_weights);
 
+  void ConvertPrePackWeightsIntoTensor(onnxruntime::AllocatorPtr& alloc, const onnxruntime::Tensor& weights, PrePackedWeights* prepacked_weights);
+
+  void ConvertTensorToPrePackWeight(void* tesnor_data_raw);
+
   std::array<IAllocatorUniquePtr<void>, 3> packed_weights_;
   size_t packed_weights_size_[3] = {0, 0, 0};
   bool is_prepack_ = false;
   TensorShape weight_shape_;
+  IAllocatorUniquePtr<void> packed_buffer_;
+  std::optional<Tensor> packed_tensor_{std::nullopt};
 };
 
 // These ops are internal-only, so register outside of onnx
@@ -102,7 +113,7 @@ bool Attention<T>::IsPackWeightsSuccessful(int qkv_index,
 
 template <typename T>
 Status Attention<T>::PrePack(const Tensor& weights, int input_idx, AllocatorPtr alloc,
-                             bool /*save_prepacked_initializers*/,
+                             bool save_prepacked_initializers,
                              /*out*/ bool& is_packed,
                              /*out*/ PrePackedWeights* prepacked_weights) {
   /* The PrePack() massages the weights to speed up Compute(), there is an option to
@@ -171,9 +182,72 @@ Status Attention<T>::PrePack(const Tensor& weights, int input_idx, AllocatorPtr 
     return Status::OK();
   }
 
+  if (save_prepacked_initializers) {
+    ConvertPrePackWeightsIntoTensor(alloc, weights, prepacked_weights);
+  }
+
   is_packed = true;
   is_prepack_ = true;
   return Status::OK();
+}
+
+template <typename T>
+void Attention<T>::ConvertPrePackWeightsIntoTensor(onnxruntime::AllocatorPtr& alloc,
+                                                   const onnxruntime::Tensor& weights,
+                                                   PrePackedWeights* prepacked_weights) {
+  // buffer of packed_tensor is combine of:
+  // 1. packed_weights: packed_weights_[0], packed_weights_[1], packed_weights_[2]
+  // 2. weight shape: first vector memory size, then vector content
+  // 3. original packed_weights buffer in order
+
+  TensorShapeVector shape_vector = weight_shape_.AsShapeVector();
+  size_t shape_vector_mem_size = utils::CalculateTensorShapeVectorMemoryUsage(shape_vector);
+  void* shape_vector_ptr = static_cast<void*>(&shape_vector);
+
+  // for prepacked memory buffer, ensure their memory address is memory aligned
+  size_t aligned_offset = utils::GetMemoryAlignedOffset(4 * sizeof(size_t) + shape_vector_mem_size);
+  size_t aligned_offset2 = utils::GetMemoryAlignedOffset(aligned_offset + packed_weights_size_[0] * num_heads_);
+  size_t aligned_offset3 = utils::GetMemoryAlignedOffset(aligned_offset2 + packed_weights_size_[1] * num_heads_);
+
+  size_t buffer_size = packed_weights_size_[2] * num_heads_ + aligned_offset3;
+
+  packed_buffer_ = IAllocator::MakeUniquePtr<void>(alloc,
+                                                   buffer_size,
+                                                   true);
+
+  std::memcpy(packed_buffer_.get(),
+              &packed_weights_size_[0],
+              sizeof(size_t));
+  std::memcpy(static_cast<char*>(packed_buffer_.get()) + sizeof(size_t),
+              &packed_weights_size_[1],
+              sizeof(size_t));
+  std::memcpy(static_cast<char*>(packed_buffer_.get()) + 2 * sizeof(size_t),
+              &packed_weights_size_[2],
+              sizeof(size_t));
+  std::memcpy(static_cast<char*>(packed_buffer_.get()) + 3 * sizeof(size_t),
+              &shape_vector_mem_size,
+              sizeof(size_t));
+  std::memcpy(static_cast<char*>(packed_buffer_.get()) + 4 * sizeof(size_t),
+              shape_vector_ptr,
+              shape_vector_mem_size);
+
+  std::memcpy(static_cast<char*>(packed_buffer_.get()) + aligned_offset,
+              packed_weights_[0] != nullptr ? packed_weights_[0].get() : prepacked_weights->buffers_[0].get(),
+              packed_weights_size_[0] * num_heads_);
+
+  std::memcpy(static_cast<char*>(packed_buffer_.get()) + aligned_offset2,
+              packed_weights_[1] != nullptr ? packed_weights_[1].get() : prepacked_weights->buffers_[1].get(),
+              packed_weights_size_[1] * num_heads_);
+
+  std::memcpy(static_cast<char*>(packed_buffer_.get()) + aligned_offset3,
+              packed_weights_[2] != nullptr ? packed_weights_[2].get() : prepacked_weights->buffers_[2].get(),
+              packed_weights_size_[2] * num_heads_);
+
+  std::vector<int64_t> packed_weights_dims = {static_cast<int64_t>((buffer_size - 1) / weights.DataType()->Size()) + 1};
+  packed_tensor_ = Tensor(weights.DataType(),
+                          TensorShape(packed_weights_dims),
+                          packed_buffer_.get(),
+                          OrtMemoryInfo(CPU, OrtAllocatorType::OrtDeviceAllocator));
 }
 
 template <typename T>
@@ -190,6 +264,57 @@ Status Attention<T>::UseSharedPrePackedBuffers(std::vector<BufferUniquePtr>& pre
   packed_weights_[2] = std::move(prepacked_buffers[2]);
 
   return Status::OK();
+}
+
+template <typename T>
+std::optional<Tensor> Attention<T>::GetPrePackTensor(int input_index) {
+  if (1 != input_index) {
+    return std::nullopt;
+  }
+
+  return std::move(packed_tensor_);
+}
+
+template <typename T>
+Status Attention<T>::SetPrePackTensor(int input_idx, const Tensor& pre_packed_tensor) {
+  if (1 != input_idx) {
+    return Status::OK();
+  }
+
+  ConvertTensorToPrePackWeight(const_cast<void*>(pre_packed_tensor.DataRaw()));
+  is_prepack_ = true;
+
+  return Status::OK();
+}
+
+template <typename T>
+void Attention<T>::ConvertTensorToPrePackWeight(void* tensor_data_raw) {
+  // buffer of packed_tensor is combine of:
+  // 1. packed_weights: packed_weights_[0], packed_weights_[1], packed_weights_[2]
+  // 2. weight shape: first vector memory size, then vector content
+  // 3. original packed_weights buffer in order
+  packed_weights_size_[0] = *reinterpret_cast<size_t*>(tensor_data_raw);
+  packed_weights_size_[1] = *(reinterpret_cast<size_t*>(tensor_data_raw) + 1);
+  packed_weights_size_[2] = *(reinterpret_cast<size_t*>(tensor_data_raw) + 2);
+
+  size_t weight_shape_buffer_size = *(reinterpret_cast<size_t*>(tensor_data_raw) + 3);
+  AllocatorPtr alloc = std::make_shared<CPUAllocator>();
+  auto weight_shape_buffer = IAllocator::MakeUniquePtr<void>(alloc, weight_shape_buffer_size, true);
+  std::memcpy(weight_shape_buffer.get(),
+              static_cast<char*>(tensor_data_raw) + 4 * sizeof(size_t),
+              weight_shape_buffer_size);
+  auto weight_shape_vector = static_cast<const InlinedVector<int64_t>*>(weight_shape_buffer.get());
+  weight_shape_ = TensorShape(*weight_shape_vector);
+
+  size_t aligned_offset = utils::GetMemoryAlignedOffset(4 * sizeof(size_t) + weight_shape_buffer_size);
+  size_t aligned_offset2 = utils::GetMemoryAlignedOffset(aligned_offset + packed_weights_size_[0] * num_heads_);
+  size_t aligned_offset3 = utils::GetMemoryAlignedOffset(aligned_offset2 + packed_weights_size_[1] * num_heads_);
+  packed_weights_[0] = BufferUniquePtr(static_cast<char*>(tensor_data_raw) + aligned_offset,
+                                       BufferDeleter());
+  packed_weights_[1] = BufferUniquePtr(static_cast<char*>(tensor_data_raw) + aligned_offset2,
+                                       BufferDeleter());
+  packed_weights_[2] = BufferUniquePtr(static_cast<char*>(tensor_data_raw) + aligned_offset3,
+                                       BufferDeleter());
 }
 
 template <typename T>

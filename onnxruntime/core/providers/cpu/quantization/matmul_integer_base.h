@@ -5,6 +5,7 @@
 #include "core/mlas/inc/mlas.h"
 #include "core/providers/common.h"
 #include "core/common/safeint.h"
+#include "core/framework/utils.h"
 #include "core/quantization/quantization.h"
 
 namespace onnxruntime {
@@ -14,7 +15,7 @@ class MatMulIntegerBase : public OpKernel {
   MatMulIntegerBase(const OpKernelInfo& info) : OpKernel(info) {}
 
   Status PrePack(const Tensor& tensor, int input_idx, AllocatorPtr alloc,
-                 bool /*save_prepacked_initializers*/,
+                 bool save_prepacked_initializers,
                  /*out*/ bool& is_packed,
                  /*out*/ PrePackedWeights* prepacked_weights) override {
     is_packed = false;
@@ -61,6 +62,12 @@ class MatMulIntegerBase : public OpKernel {
         prepacked_weights->buffer_sizes_.push_back(packed_b_size);
       }
 
+      if (save_prepacked_initializers) {
+        void* original_packed_buffer = share_prepacked_weights ? prepacked_weights->buffers_[0].get() : packed_b_.get();
+        packed_tensor_ = utils::ConvertPackedBufferAndShapeToTensor(alloc, tensor, packed_b_size, b_shape_, 1,
+                                                                    original_packed_buffer, packed_buffer_);
+      }
+
       is_packed = true;
     }
     return Status::OK();
@@ -74,6 +81,24 @@ class MatMulIntegerBase : public OpKernel {
     if (input_idx == GetBIdx()) {
       used_shared_buffers = true;
       packed_b_ = std::move(prepacked_buffers[0]);
+    }
+
+    return Status::OK();
+  }
+
+  std::optional<Tensor> GetPrePackTensor(int input_idx) override {
+    if (input_idx == GetBIdx()) {
+      return std::move(packed_tensor_);
+    } else {
+      return std::nullopt;
+    }
+  }
+
+  Status SetPrePackTensor(int input_idx, const Tensor& pre_packed_tensor) override {
+    if (input_idx == GetBIdx()) {
+      size_t packed_b_size_;
+      utils::ConvertTensorToPackedBufferAndShape(packed_b_size_, b_shape_, packed_b_, const_cast<void*>(pre_packed_tensor.DataRaw()));
+      b_is_signed_ = pre_packed_tensor.IsDataType<int8_t>();
     }
 
     return Status::OK();
@@ -128,6 +153,8 @@ class MatMulIntegerBase : public OpKernel {
   bool b_is_signed_{true};
   TensorShape b_shape_;
   IAllocatorUniquePtr<void> packed_b_;
+  IAllocatorUniquePtr<void> packed_buffer_;
+  std::optional<Tensor> packed_tensor_{std::nullopt};
 };
 
 }  // namespace onnxruntime

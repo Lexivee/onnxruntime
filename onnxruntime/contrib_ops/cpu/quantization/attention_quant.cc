@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "core/framework/op_kernel.h"
+#include "core/framework/utils.h"
 #include "contrib_ops/cpu/bert/attention_cpu_base.h"
 #include "core/providers/common.h"
 #include "core/util/math.h"
@@ -32,11 +33,17 @@ class QAttention : public OpKernel, public AttentionCPUBase {
                                    int input_idx,
                                    /*out*/ bool& used_shared_buffers) override;
 
+  std::optional<Tensor> GetPrePackTensor(int input_index) override;
+
+  Status SetPrePackTensor(int input_idx, const Tensor& pre_packed_tensor) override;
+
  private:
   IAllocatorUniquePtr<void> packed_weights_;
   size_t packed_weights_size_;
   TensorShape weight_shape_;
   bool weights_is_signed_;
+  IAllocatorUniquePtr<void> packed_buffer_;
+  std::optional<Tensor> packed_tensor_{std::nullopt};
 };
 
 // These ops are internal-only, so register outside of onnx
@@ -59,7 +66,7 @@ QAttention<T>::QAttention(const OpKernelInfo& info) : OpKernel(info), AttentionC
 
 template <typename T>
 Status QAttention<T>::PrePack(const Tensor& weights, int input_idx, AllocatorPtr alloc,
-                              bool /*save_prepacked_initializers*/,
+                              bool save_prepacked_initializers,
                               /*out*/ bool& is_packed,
                               /*out*/ PrePackedWeights* prepacked_weights) {
   if (1 != input_idx) {
@@ -113,6 +120,12 @@ Status QAttention<T>::PrePack(const Tensor& weights, int input_idx, AllocatorPtr
     prepacked_weights->buffer_sizes_.push_back(packed_weights_data_size);
   }
 
+  if (save_prepacked_initializers) {
+    void* original_packed_buffer = share_prepacked_weights ? prepacked_weights->buffers_[0].get() : packed_weights_.get();
+    packed_tensor_ = utils::ConvertPackedBufferAndShapeToTensor(alloc, weights, packed_weights_size_, weight_shape_, 3 * num_heads_,
+                                                                original_packed_buffer, packed_buffer_);
+  }
+
   is_packed = true;
   return Status::OK();
 }
@@ -127,6 +140,28 @@ Status QAttention<T>::UseSharedPrePackedBuffers(std::vector<BufferUniquePtr>& pr
 
   used_shared_buffers = true;
   packed_weights_ = std::move(prepacked_buffers[0]);
+
+  return Status::OK();
+}
+
+template <typename T>
+std::optional<Tensor> QAttention<T>::GetPrePackTensor(int input_idx) {
+  if (1 != input_idx) {
+    return std::nullopt;
+  }
+
+  return std::move(packed_tensor_);
+}
+
+template <typename T>
+Status QAttention<T>::SetPrePackTensor(int input_idx, const Tensor& pre_packed_tensor) {
+  if (1 != input_idx) {
+    return Status::OK();
+  }
+
+  utils::ConvertTensorToPackedBufferAndShape(packed_weights_size_, weight_shape_, packed_weights_, const_cast<void*>(pre_packed_tensor.DataRaw()));
+
+  weights_is_signed_ = pre_packed_tensor.IsDataType<int8_t>();
 
   return Status::OK();
 }

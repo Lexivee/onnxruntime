@@ -4575,6 +4575,10 @@ struct MockGQA : public OrtCustomOp {
   }
 };
 
+bool nan_equal(float a, float b) {
+  return (a == b) || (std::isnan(a) && std::isnan(b));
+}
+
 TEST(CApiTest, OrtCustomOp_GetInPlace) {
   MockGQA mock_gqa;
   int* input_index = nullptr;
@@ -4601,9 +4605,12 @@ TEST(CApiTest, OrtCustomOp_GetInPlace) {
   mock_gqa.ReleaseAliasMap(input_index, output_index);
 }
 
-TEST(CApiTest, Serialize_PrePack_Initializers) {
-  std::string model_name = "model_with_matmul_nbits";
-
+// Test feature serialize prepack weight is only used in PC with CPU on inference,
+// disable this test for training, other device and eps
+#if !ENABLE_TRAINING && !defined(USE_CUDA) && !defined(__wasm__) && !defined(USE_DNNL) && !defined(USE_QNN) && !defined(__ANDROID__) && !defined(USE_COREML)
+// MLAS dispatcher used in matmul_nbits kernels here is 64 bit only
+#if defined(__amd64__) || defined(_M_AMD64) || defined(__aarch64__) || defined(_M_ARM64)
+void RunInferenceWithAndWithoutSerializePrepackWeightAndCompare(std::string model_name) {
   const std::string test_model = "testdata/prepack/" + model_name + ".onnx";
   const std::string optimized_model = "testdata/prepack/" + model_name + "_opt.onnx";
   std::string external_initializer_file_name = model_name + "_opt.onnx.data";
@@ -4613,6 +4620,8 @@ TEST(CApiTest, Serialize_PrePack_Initializers) {
   session_options_opt.AddConfigEntry(kOrtSessionOptionsOptimizedModelExternalInitializersFileName, external_initializer_file_name.c_str());
   session_options_opt.AddConfigEntry(kOrtSessionOptionsOptimizedModelExternalInitializersMinSizeInBytes, "0");
   session_options_opt.AddConfigEntry(kOrtSessionOptionsSavePrePackedConstantInitializers, "1");
+  session_options_opt.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_DISABLE_ALL);
+  session_options_opt.DisableCpuMemArena();
 
 #if defined(_WIN32) || defined(_WIN64)
   std::wstring test_model_wide = onnxruntime::ToWideString(test_model);
@@ -4630,12 +4639,26 @@ TEST(CApiTest, Serialize_PrePack_Initializers) {
   const char* const output_names[] = {"Y"};
   Ort::MemoryInfo info("Cpu", OrtDeviceAllocator, 0, OrtMemTypeDefault);
 
+  // get dim of first input-A from model
+  auto in0 = session_opt_model.GetInputTypeInfo(0);
+  auto in0_ttsi = in0.GetTensorTypeAndShapeInfo();
+  auto input_0_dims = in0_ttsi.GetShape();
+  auto product = std::accumulate(input_0_dims.begin(), input_0_dims.end(), (int64_t)1, std::multiplies<int64_t>());
+
   std::vector<Ort::Value> ort_inputs;
-  std::vector<float> input_0_data = {1.3f};
-  std::vector<int64_t> input_0_dims = {1, 1};
-  ort_inputs.emplace_back(
-      Ort::Value::CreateTensor<float>(info, const_cast<float*>(input_0_data.data()),
-                                      input_0_data.size(), input_0_dims.data(), input_0_dims.size()));
+
+  // generate input for model, for quant node use int8, others float
+  if (model_name.find("quant") != std::string::npos) {
+    std::vector<uint8_t> input_0_data(product, 5);
+    ort_inputs.emplace_back(
+        Ort::Value::CreateTensor<uint8_t>(info, const_cast<uint8_t*>(input_0_data.data()),
+                                          input_0_data.size(), input_0_dims.data(), input_0_dims.size()));
+  } else {
+    std::vector<float> input_0_data(product, 5.0f);
+    ort_inputs.emplace_back(
+        Ort::Value::CreateTensor<float>(info, const_cast<float*>(input_0_data.data()),
+                                        input_0_data.size(), input_0_dims.data(), input_0_dims.size()));
+  }
 
   // run inference with original model
   // Convert std::string to std::wstring
@@ -4680,6 +4703,59 @@ TEST(CApiTest, Serialize_PrePack_Initializers) {
     const auto* result_vals_opt = sequences_opt.GetTensorData<float>();
     auto result_span_opt = gsl::make_span(result_vals_opt, ort_outputs_opt.size());
 
-    ASSERT_TRUE(std::equal(result_span_opt.begin(), result_span_opt.end(), result_span.begin(), result_span.end()));
+    ASSERT_TRUE(std::equal(result_span_opt.begin(), result_span_opt.end(), result_span.begin(), result_span.end(), nan_equal));
   }
 }
+
+TEST(CApiTest, Serialize_PrePack_Initializers_Conv_transpose) {
+  RunInferenceWithAndWithoutSerializePrepackWeightAndCompare("model_with_conv_transpose");
+}
+
+TEST(CApiTest, Serialize_PrePack_Initializers_Quant_Attention) {
+  RunInferenceWithAndWithoutSerializePrepackWeightAndCompare("model_with_quant_attention");
+}
+
+TEST(CApiTest, Serialize_PrePack_Initializers_Dynamic_Quant_lstm) {
+  RunInferenceWithAndWithoutSerializePrepackWeightAndCompare("model_with_dynamic_quan_lstm");
+}
+
+TEST(CApiTest, Serialize_PrePack_Initializers_Deep_cpu_lstm) {
+  RunInferenceWithAndWithoutSerializePrepackWeightAndCompare("model_with_deep_cpu_lstm");
+}
+
+TEST(CApiTest, Serialize_PrePack_Initializers_Matmul_integer_quant) {
+  RunInferenceWithAndWithoutSerializePrepackWeightAndCompare("model_with_matmul_integer_quant");
+}
+
+TEST(CApiTest, Serialize_PrePack_Initializers_Deep_Cpu_Gru) {
+  RunInferenceWithAndWithoutSerializePrepackWeightAndCompare("model_with_deep_cpu_gru");
+}
+
+TEST(CApiTest, Serialize_PrePack_Initializers_Quant_LinearConv) {
+  RunInferenceWithAndWithoutSerializePrepackWeightAndCompare("model_with_quant_linearconv");
+}
+
+TEST(CApiTest, Serialize_PrePack_Initializers_Matmul) {
+  RunInferenceWithAndWithoutSerializePrepackWeightAndCompare("model_with_matmul");
+}
+
+#if defined(MLAS_F16VEC_INTRINSICS_SUPPORTED)
+TEST(CApiTest, Serialize_PrePack_Initializers_fp16_conv) {
+  RunInferenceWithAndWithoutSerializePrepackWeightAndCompare("model_with_fp16_conv");
+}
+#endif
+
+TEST(CApiTest, Serialize_PrePack_Initializers_Matmul_nbits) {
+  RunInferenceWithAndWithoutSerializePrepackWeightAndCompare("model_with_matmul_nbits");
+}
+
+TEST(CApiTest, Serialize_PrePack_Initializers_Gemm) {
+  RunInferenceWithAndWithoutSerializePrepackWeightAndCompare("model_with_gemm");
+}
+
+TEST(CApiTest, Serialize_PrePack_Initializers_Attention) {
+  RunInferenceWithAndWithoutSerializePrepackWeightAndCompare("model_with_attention");
+}
+
+#endif
+#endif
