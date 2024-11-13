@@ -402,10 +402,12 @@ vaip_core::OrtApiForVaip* create_org_api_hook() {
   the_global_api.tensor_proto_get_shape_unsafe = vaip::tensor_proto_get_shape;
   the_global_api.tensor_proto_data_type = [](const ONNX_NAMESPACE::TensorProto& t) -> int { return t.data_type(); };
   the_global_api.tensor_proto_delete = [](ONNX_NAMESPACE::TensorProto* tp) { delete tp; };
+  the_global_api.tensor_proto_new_i4 = vaip::tensor_proto_new_i4;
   the_global_api.tensor_proto_new_i8 = vaip::tensor_proto_new_i8;
   the_global_api.tensor_proto_new_i16 = vaip::tensor_proto_new_i16;
   the_global_api.tensor_proto_new_i32 = vaip::tensor_proto_new_i32;
   the_global_api.tensor_proto_new_i64 = vaip::tensor_proto_new_i64;
+  the_global_api.tensor_proto_new_u4 = vaip::tensor_proto_new_u4;
   the_global_api.tensor_proto_new_u8 = vaip::tensor_proto_new_u8;
   the_global_api.tensor_proto_new_u16 = vaip::tensor_proto_new_u16;
   the_global_api.tensor_proto_new_u32 = vaip::tensor_proto_new_u32;
