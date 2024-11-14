@@ -2456,7 +2456,8 @@ std::set<std::string> GetExcludedNodeSet(std::string node_list_to_exclude) {
 
 std::vector<std::unique_ptr<ComputeCapability>>
 TensorrtExecutionProvider::GetCapability(const GraphViewer& graph,
-                                         const IKernelLookup& /*kernel_lookup*/) const {
+                                         const IKernelLookup& /*kernel_lookup*/,
+                                         IResourceAccountant* /* resource_accountant */) const {
   // Construct subgraph capability from node list
   std::vector<std::unique_ptr<ComputeCapability>> result;
   // Get ModelPath
