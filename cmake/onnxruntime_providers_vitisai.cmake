@@ -53,7 +53,7 @@
   endif(MSVC)
 
   if(MSVC)
-    target_link_options(${ARG_NAME} PRIVATE "/NODEFAULTLIB:libucrt.lib" "/DEFAULTLIB:ucrt.lib")
+    target_link_options(onnxruntime_providers_vitisai PRIVATE "/NODEFAULTLIB:libucrt.lib" "/DEFAULTLIB:ucrt.lib")
   endif(MSCV)
 
   set_target_properties(onnxruntime_providers_vitisai PROPERTIES FOLDER "ONNXRuntime")
