@@ -17,6 +17,7 @@
 #include <assert.h>
 #include "providers.h"
 #include "TestCase.h"
+#include "strings_helper.h"
 
 #ifdef USE_OPENVINO
 #include "nlohmann/json.hpp"
@@ -58,6 +59,7 @@ OnnxRuntimeTestSession::OnnxRuntimeTestSession(Ort::Env& env, std::random_device
   Ort::SessionOptions session_options;
 
   provider_name_ = performance_test_config.machine_config.provider_type_name;
+  std::unordered_map<std::string, std::string> provider_options;
   if (provider_name_ == onnxruntime::kDnnlExecutionProvider) {
 #ifdef USE_DNNL
     // Generate provider options
@@ -72,24 +74,14 @@ OnnxRuntimeTestSession::OnnxRuntimeTestSession(Ort::Env& env, std::random_device
     std::string ov_string = performance_test_config.run_config.ep_runtime_config_string;
 #endif  // defined(_MSC_VER)
     int num_threads = 0;
-    std::istringstream ss(ov_string);
-    std::string token;
-    while (ss >> token) {
-      if (token == "") {
-        continue;
-      }
-      auto pos = token.find("|");
-      if (pos == std::string::npos || pos == 0 || pos == token.length()) {
-        ORT_THROW(
-            "[ERROR] [OneDNN] Use a '|' to separate the key and value for the "
-            "run-time option you are trying to use.\n");
-      }
-
-      auto key = token.substr(0, pos);
-      auto value = token.substr(pos + 1);
-
-      if (key == "num_of_threads") {
-        std::stringstream sstream(value);
+    if (!ParseSessionConfigs(ov_string, provider_options)) {
+      ORT_THROW(
+          "[ERROR] Use a '|' to separate the key and value for the "
+          "run-time option you are trying to use.\n");
+    }
+    for (const auto& provider_option : provider_options) {
+      if (provider_option.first == "num_of_threads") {
+        std::stringstream sstream(provider_option.second);
         sstream >> num_threads;
         if (num_threads < 0) {
           ORT_THROW(
@@ -144,22 +136,14 @@ OnnxRuntimeTestSession::OnnxRuntimeTestSession(Ort::Env& env, std::random_device
 #else
     std::string ov_string = performance_test_config.run_config.ep_runtime_config_string;
 #endif
-    std::istringstream ss(ov_string);
-    std::string token;
-    while (ss >> token) {
-      if (token == "") {
-        continue;
-      }
-      auto pos = token.find("|");
-      if (pos == std::string::npos || pos == 0 || pos == token.length()) {
-        ORT_THROW(
-            "[ERROR] [CUDA] Use a '|' to separate the key and value for the run-time option you are trying to use.\n");
-      }
-
-      buffer.emplace_back(token.substr(0, pos));
-      option_keys.push_back(buffer.back().c_str());
-      buffer.emplace_back(token.substr(pos + 1));
-      option_values.push_back(buffer.back().c_str());
+    if (!ParseSessionConfigs(ov_string, provider_options)) {
+      ORT_THROW(
+          "[ERROR] Use a '|' to separate the key and value for the "
+          "run-time option you are trying to use.\n");
+    }
+    for (const auto& provider_option : provider_options) {
+      option_keys.push_back(provider_option.first.c_str());
+      option_values.push_back(provider_option.second.c_str());
     }
 
     Ort::Status status(api.UpdateCUDAProviderOptions(cuda_options,
@@ -192,24 +176,15 @@ OnnxRuntimeTestSession::OnnxRuntimeTestSession(Ort::Env& env, std::random_device
 #else
     std::string ov_string = performance_test_config.run_config.ep_runtime_config_string;
 #endif
-    std::istringstream ss(ov_string);
-    std::string token;
-    while (ss >> token) {
-      if (token == "") {
-        continue;
-      }
-      auto pos = token.find("|");
-      if (pos == std::string::npos || pos == 0 || pos == token.length()) {
-        ORT_THROW(
-            "[ERROR] [TensorRT] Use a '|' to separate the key and value for the run-time option you are trying to use.\n");
-      }
-
-      buffer.emplace_back(token.substr(0, pos));
-      option_keys.push_back(buffer.back().c_str());
-      buffer.emplace_back(token.substr(pos + 1));
-      option_values.push_back(buffer.back().c_str());
+    if (!ParseSessionConfigs(ov_string, provider_options)) {
+      ORT_THROW(
+          "[ERROR] Use a '|' to separate the key and value for the "
+          "run-time option you are trying to use.\n");
     }
-
+    for (const auto& provider_option : provider_options) {
+      option_keys.push_back(provider_option.first.c_str());
+      option_values.push_back(provider_option.second.c_str());
+    }
     Ort::Status status(api.UpdateTensorRTProviderOptions(tensorrt_options,
                                                          option_keys.data(), option_values.data(), option_keys.size()));
     if (!status.IsOK()) {
@@ -239,22 +214,14 @@ OnnxRuntimeTestSession::OnnxRuntimeTestSession(Ort::Env& env, std::random_device
 #else
     std::string option_string = performance_test_config.run_config.ep_runtime_config_string;
 #endif
-    std::istringstream ss(option_string);
-    std::string token;
-    std::unordered_map<std::string, std::string> qnn_options;
-
-    while (ss >> token) {
-      if (token == "") {
-        continue;
-      }
-      auto pos = token.find("|");
-      if (pos == std::string::npos || pos == 0 || pos == token.length()) {
-        ORT_THROW("Use a '|' to separate the key and value for the run-time option you are trying to use.");
-      }
-
-      std::string key(token.substr(0, pos));
-      std::string value(token.substr(pos + 1));
-
+    if (!ParseSessionConfigs(option_string, provider_options)) {
+      ORT_THROW(
+          "[ERROR] Use a '|' to separate the key and value for the "
+          "run-time option you are trying to use.\n");
+    }
+    for (const auto& provider_option : provider_options) {
+      const std::string& key = provider_option.first;
+      const std::string& value = provider_option.second;
       if (key == "backend_path" || key == "profiling_file_path") {
         if (value.empty()) {
           ORT_THROW("Please provide the valid file path.");
@@ -317,10 +284,8 @@ OnnxRuntimeTestSession::OnnxRuntimeTestSession(Ort::Env& env, std::random_device
 'qnn_saver_path', 'htp_graph_finalization_optimization_mode', 'qnn_context_priority', 'soc_model',
 'htp_arch', 'device_id', 'enable_htp_fp16_precision', 'offload_graph_io_quantization'])");
       }
-
-      qnn_options[key] = value;
     }
-    session_options.AppendExecutionProvider("QNN", qnn_options);
+    session_options.AppendExecutionProvider("QNN", provider_options);
 #else
     ORT_THROW("QNN is not supported in this build\n");
 #endif
@@ -331,22 +296,12 @@ OnnxRuntimeTestSession::OnnxRuntimeTestSession(Ort::Env& env, std::random_device
 #else
     std::string option_string = performance_test_config.run_config.ep_runtime_config_string;
 #endif
-    std::istringstream ss(option_string);
-    std::string token;
-    std::unordered_map<std::string, std::string> snpe_options;
-
-    while (ss >> token) {
-      if (token == "") {
-        continue;
-      }
-      auto pos = token.find("|");
-      if (pos == std::string::npos || pos == 0 || pos == token.length()) {
-        ORT_THROW("Use a '|' to separate the key and value for the run-time option you are trying to use.\n");
-      }
-
-      std::string key(token.substr(0, pos));
-      std::string value(token.substr(pos + 1));
-
+    if (!ParseSessionConfigs(option_string, provider_options)) {
+      ORT_THROW(
+          "[ERROR] Use a '|' to separate the key and value for the "
+          "run-time option you are trying to use.\n");
+    }
+    for (const auto& provider_option : provider_options) {
       if (key == "runtime") {
         std::set<std::string> supported_runtime = {"CPU", "GPU_FP32", "GPU", "GPU_FLOAT16", "DSP", "AIP_FIXED_TF"};
         if (supported_runtime.find(value) == supported_runtime.end()) {
@@ -368,11 +323,9 @@ select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
       } else {
         ORT_THROW("Wrong key type entered. Choose from options: ['runtime', 'priority', 'buffer_type', 'enable_init_cache'] \n");
       }
-
-      snpe_options[key] = value;
     }
 
-    session_options.AppendExecutionProvider("SNPE", snpe_options);
+    session_options.AppendExecutionProvider("SNPE", provider_options);
 #else
     ORT_THROW("SNPE is not supported in this build\n");
 #endif
@@ -416,30 +369,37 @@ select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
   } else if (provider_name_ == onnxruntime::kCoreMLExecutionProvider) {
 #ifdef __APPLE__
 #ifdef USE_COREML
-    uint32_t coreml_flags = 0;
     std::string ov_string = performance_test_config.run_config.ep_runtime_config_string;
-    std::istringstream ss(ov_string);
+    if (!ParseSessionConfigs(ov_string, provider_options)) {
+      ORT_THROW(
+          "[ERROR] Use a '|' to separate the key and value for the "
+          "run-time option you are trying to use.\n");
+    }
 
-    std::string key;
-    while (ss >> key) {
-      if (key == "COREML_FLAG_CREATE_MLPROGRAM") {
-        coreml_flags |= COREML_FLAG_CREATE_MLPROGRAM;
-        std::cout << "Enabling ML Program.\n";
-      } else if (key == "COREML_FLAG_USE_CPU_ONLY") {
-        coreml_flags |= COREML_FLAG_USE_CPU_ONLY;
-        std::cout << "CoreML enabled COREML_FLAG_USE_CPU_ONLY.\n";
-      } else if (key == "COREML_FLAG_USE_CPU_AND_GPU") {
-        coreml_flags |= COREML_FLAG_USE_CPU_AND_GPU;
-        std::cout << "CoreML enabled COREML_FLAG_USE_CPU_AND_GPU.\n";
-      } else if (key.empty()) {
+    std::unordered_map<std::string, std::string> available_options = {
+        {"MLComputeUnitsCPUAndNeuralEngine", "1"},
+        {"MLComputeUnitsCPUAndGPU", "1"},
+        {"MLComputeUnitsCPUOnly", "1"},
+        {"MLComputeUnitsAll", "1"},
+    };
+    for (const auto& provider_option : provider_options) {
+      if (provider_option.first == kCoremlProviderOption_MLComputeUnits &&
+          available_options.find(provider_option.second) != available_options.end()) {
+      } else if (provider_option.first == kCoremlProviderOption_MLModelFormat &&
+                 (provider_option.second == "MLProgram" || provider_option.second == "NeuralNetwork")) {
+      } else if (provider_option.first == kCoremlProviderOption_MLAllowStaticInputShapes &&
+                 (provider_option.second == "1" || provider_option.second == "0")) {
+      } else if (provider_option.first == kCoremlProviderOption_MLEnableOnSubgraphs &&
+                 (provider_option.second == "0" || provider_option.second == "1")) {
       } else {
         ORT_THROW(
             "[ERROR] [CoreML] wrong key type entered. Choose from the following runtime key options "
-            "that are available for CoreML. ['COREML_FLAG_CREATE_MLPROGRAM'] \n");
+            "that are available for CoreML. "
+            "['MLComputeUnits', 'ModelFormat', 'AllowStaticInputShapes', 'EnableOnSubgraphs'] \n");
       }
     }
     // COREML_FLAG_CREATE_MLPROGRAM
-    Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CoreML(session_options, coreml_flags));
+    session_options.AppendExecutionProvider("CoreML", provider_options);
 #else
     ORT_THROW("CoreML is not supported in this build\n");
 #endif
@@ -448,34 +408,22 @@ select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
 #endif
   } else if (provider_name_ == onnxruntime::kDmlExecutionProvider) {
 #ifdef USE_DML
-    std::unordered_map<std::string, std::string> dml_options;
-    dml_options["performance_preference"] = "high_performance";
-    dml_options["device_filter"] = "gpu";
-    dml_options["disable_metacommands"] = "false";
-    dml_options["enable_graph_capture"] = "false";
 #ifdef _MSC_VER
     std::string ov_string = ToUTF8String(performance_test_config.run_config.ep_runtime_config_string);
 #else
     std::string ov_string = performance_test_config.run_config.ep_runtime_config_string;
 #endif
-    std::istringstream ss(ov_string);
-    std::string token;
-    while (ss >> token) {
-      if (token == "") {
-        continue;
-      }
-      auto pos = token.find("|");
-      if (pos == std::string::npos || pos == 0 || pos == token.length()) {
-        ORT_THROW("[ERROR] [DML] Use a '|' to separate the key and value for the run-time option you are trying to use.\n");
-      }
-
-      auto key = token.substr(0, pos);
-      auto value = token.substr(pos + 1);
-
+    if (!ParseSessionConfigs(ov_string, provider_options)) {
+      ORT_THROW(
+          "[ERROR] Use a '|' to separate the key and value for the "
+          "run-time option you are trying to use.\n");
+    }
+    for (const auto& provider_option : provider_options) {
+      const std::string& key = provider_option.first;
+      const std::string& value = provider_option.second;
       if (key == "device_filter") {
         std::set<std::string> ov_supported_device_types = {"gpu", "npu"};
         if (ov_supported_device_types.find(value) != ov_supported_device_types.end()) {
-          dml_options[key] = value;
         } else {
           ORT_THROW(
               "[ERROR] [DML] You have selected a wrong configuration value for the key 'device_filter'. "
@@ -484,7 +432,6 @@ select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
       } else if (key == "performance_preference") {
         std::set<std::string> ov_supported_values = {"default", "high_performance", "minimal_power"};
         if (ov_supported_values.find(value) != ov_supported_values.end()) {
-          dml_options[key] = value;
         } else {
           ORT_THROW(
               "[ERROR] [DML] You have selected a wrong configuration value for the key 'performance_preference'. "
@@ -493,7 +440,6 @@ select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
       } else if (key == "disable_metacommands") {
         std::set<std::string> ov_supported_values = {"true", "True", "false", "False"};
         if (ov_supported_values.find(value) != ov_supported_values.end()) {
-          dml_options[key] = value;
         } else {
           ORT_THROW(
               "[ERROR] [DML] You have selected a wrong value for the key 'disable_metacommands'. "
@@ -502,7 +448,6 @@ select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
       } else if (key == "enable_graph_capture") {
         std::set<std::string> ov_supported_values = {"true", "True", "false", "False"};
         if (ov_supported_values.find(value) != ov_supported_values.end()) {
-          dml_options[key] = value;
         } else {
           ORT_THROW(
               "[ERROR] [DML] You have selected a wrong value for the key 'enable_graph_capture'. "
@@ -519,7 +464,19 @@ select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
         }
       }
     }
-    session_options.AppendExecutionProvider("DML", dml_options);
+    if (provider_options.find("performance_preference") == provider_options.end()) {
+      provider_options["performance_preference"] = "high_performance";
+    }
+    if (provider_options.find("device_filter") == provider_options.end()) {
+      provider_options["device_filter"] = "gpu";
+    }
+    if (provider_options.find("disable_metacommands") == provider_options.end()) {
+      provider_options["disable_metacommands"] = "false";
+    }
+    if (provider_options.find("enable_graph_capture") == provider_options.end()) {
+      provider_options["enable_graph_capture"] = "false";
+    }
+    session_options.AppendExecutionProvider("DML", provider_options);
 #else
     ORT_THROW("DML is not supported in this build\n");
 #endif
@@ -530,21 +487,13 @@ select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
 #else
     std::string ov_string = performance_test_config.run_config.ep_runtime_config_string;
 #endif  // defined(_MSC_VER)
-    std::istringstream ss(ov_string);
-    std::string token;
     bool enable_fast_math = false;
-    while (ss >> token) {
-      if (token == "") {
-        continue;
-      }
-      auto pos = token.find("|");
-      if (pos == std::string::npos || pos == 0 || pos == token.length()) {
-        ORT_THROW("[ERROR] [ACL] Use a '|' to separate the key and value for the run-time option you are trying to use.\n");
-      }
-
-      auto key = token.substr(0, pos);
-      auto value = token.substr(pos + 1);
-
+    if (!ParseSessionConfigs(ov_string, provider_options)) {
+      ORT_THROW(
+          "[ERROR] Use a '|' to separate the key and value for the "
+          "run-time option you are trying to use.\n");
+    }
+    for (const auto& provider_option : provider_options) {
       if (key == "enable_fast_math") {
         std::set<std::string> ov_supported_values = {"true", "True", "false", "False"};
         if (ov_supported_values.find(value) != ov_supported_values.end()) {
@@ -612,24 +561,13 @@ select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
 #else
     std::string option_string = performance_test_config.run_config.ep_runtime_config_string;
 #endif
-    std::istringstream ss(option_string);
-    std::string token;
-    std::unordered_map<std::string, std::string> vitisai_session_options;
-
-    while (ss >> token) {
-      if (token == "") {
-        continue;
-      }
-      auto pos = token.find("|");
-      if (pos == std::string::npos || pos == 0 || pos == token.length()) {
-        ORT_THROW("[ERROR] [VitisAI] Use a '|' to separate the key and value for the run-time option you are trying to use.\n");
-      }
-
-      std::string key(token.substr(0, pos));
-      std::string value(token.substr(pos + 1));
-      vitisai_session_options[key] = value;
+    if (!ParseSessionConfigs(option_string, provider_options)) {
+      ORT_THROW(
+          "[ERROR] Use a '|' to separate the key and value for the "
+          "run-time option you are trying to use.\n");
     }
-    session_options.AppendExecutionProvider_VitisAI(vitisai_session_options);
+
+    session_options.AppendExecutionProvider_VitisAI(provider_options);
 #else
     ORT_THROW("VitisAI is not supported in this build\n");
 #endif
