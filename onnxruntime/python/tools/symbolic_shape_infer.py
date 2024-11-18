@@ -166,6 +166,7 @@ class SymbolicShapeInference:
             "Range": self._infer_Range,
             "Reciprocal": self._pass_on_shape_and_type,
             "ReduceSum": self._infer_ReduceSum,
+            "ReduceMean": self._infer_ReduceMean,
             "ReduceProd": self._infer_ReduceProd,
             "Reshape": self._infer_Reshape,
             "Resize": self._infer_Resize,
@@ -1599,6 +1600,50 @@ class SymbolicShapeInference:
                         output_shape,
                     )
                 )
+
+    def _infer_ReduceMean(self, node):  # noqa: N802
+        keep_dims = get_attribute(node, "keepdims", 1)
+        opset = get_opset(self.out_mp_)
+
+        if opset >= 13 and len(node.input) > 1:
+            axes = self._try_get_value(node, 1)
+        else:
+            axes = get_attribute(node, "axes")
+
+        vi = self.known_vi_[node.output[0]]
+
+        if axes is None:
+            assert keep_dims == 1, "ReduceMean Op: Cannot infer shape when axes is unknown and keepdims is not 1."
+            rank = self._get_shape_rank(node, 0)
+            new_shape = self._new_symbolic_shape(rank, node)
+            vi.CopyFrom(
+                helper.make_tensor_value_info(
+                    node.output[0],
+                    self.known_vi_[node.input[0]].type.tensor_type.elem_type,
+                    get_shape_from_sympy_shape(new_shape),
+                )
+            )
+        else:
+            input_shape = self._get_shape(node, 0)
+            assert input_shape, "ReduceMean Op: Reduction over an empty set of values yields undefined."
+
+            axes = [handle_negative_axis(a, len(input_shape)) for a in axes]
+            output_shape = []
+            for i, dim in enumerate(input_shape):
+                if i in axes:
+                    if keep_dims == 1:
+                        output_shape.append(1)
+                    else:
+                        continue
+                else:
+                    output_shape.append(dim)
+            vi.CopyFrom(
+                helper.make_tensor_value_info(
+                    node.output[0],
+                    self.known_vi_[node.input[0]].type.tensor_type.elem_type,
+                    output_shape,
+                )
+            )
 
     def _infer_ReduceProd(self, node):  # noqa: N802
         axes = get_attribute(node, "axes")
