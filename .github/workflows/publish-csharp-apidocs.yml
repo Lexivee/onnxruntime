@@ -30,7 +30,7 @@ jobs:
         dotnet tool update -g docfx
     - name: Update PATH
       run: |
-        Add-Content -Value "%USERPROFILE%\.dotnet\tools" -Encoding utf8 -Path $env:GITHUB_PATH
+        Add-Content -Value "$env:USERPROFILE\.dotnet\tools" -Encoding utf8 -Path $env:GITHUB_PATH
     - name: echo PATH
       run: |
         Write-Host $env:path
