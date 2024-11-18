@@ -28,6 +28,9 @@ jobs:
     - name: Install DocFX
       run: |
         dotnet tool update -g docfx
+    - name: Update PATH
+      run: |
+        echo %USERPROFILE%\.dotnet\tools >> "$GITHUB_PATH"
     # NOTE: We need to restore Microsoft.ML.OnnxRuntime.csproj manually to set IncludeMobileTargets=false
     # docfx doesn't seem to be able to do that properly resulting in build errors
     - name: Restore dependencies
