@@ -25,10 +25,6 @@ jobs:
       DOCFXVERSION: 2.62.2
     steps:
     - uses: actions/checkout@v4
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 8.0.x
     - name: Install DocFX
       run: |
         dotnet tool update -g docfx
@@ -36,6 +32,7 @@ jobs:
     # docfx doesn't seem to be able to do that properly resulting in build errors
     - name: Restore dependencies
       run: |
+        set -e -x
         dotnet restore csharp/ApiDocs/ApiDocs.csproj
         dotnet restore /p:IncludeMobileTargets=false csharp/src/Microsoft.ML.OnnxRuntime/Microsoft.ML.OnnxRuntime.csproj
     - name: docfx metadata
