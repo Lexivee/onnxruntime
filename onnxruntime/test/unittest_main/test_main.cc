@@ -93,6 +93,8 @@ int TEST_MAIN(int argc, char** argv) {
 
   ORT_TRY {
     ortenv_setup();
+    // TODO: Fix the C API issue
+    atexit(ortenv_teardown); // If we don't do this, it will crash
     ::testing::InitGoogleTest(&argc, argv);
 
     status = RUN_ALL_TESTS();
@@ -103,9 +105,6 @@ int TEST_MAIN(int argc, char** argv) {
       status = -1;
     });
   }
-
-  // TODO: Fix the C API issue
-  ortenv_teardown();  // If we don't do this, it will crash
 
 #ifndef USE_ONNXRUNTIME_DLL
   // make memory leak checker happy
