@@ -31,6 +31,9 @@ jobs:
     - name: Update PATH
       run: |
         echo %USERPROFILE%\.dotnet\tools >> "$GITHUB_PATH"
+    - name: docfx metadata
+      run: |
+        Write-Host $env:path
     # NOTE: We need to restore Microsoft.ML.OnnxRuntime.csproj manually to set IncludeMobileTargets=false
     # docfx doesn't seem to be able to do that properly resulting in build errors
     - name: Restore dependencies
