@@ -6,6 +6,6 @@ lintrunner-adapters==0.12.4
 ruff==0.5.4
 # BLACK-ISORT
 black==24.2.0
-isort==5.13.2
+isort==6.0.0
 # CLANGFORMAT
 clang-format==18.1.8
